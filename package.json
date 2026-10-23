@@ -1,8 +1,8 @@
 {
   "name": "cleanyourtv-tizenbrew",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "Clean, remote-first launcher-style home screen for Samsung Tizen TVs via TizenBrew.",
+  "description": "Fast, remote-first launcher-style home screen for Samsung Tizen TVs via TizenBrew.",
   "packageType": "app",
   "appName": "CleanYourTV",
   "appPath": "app/index.html",
