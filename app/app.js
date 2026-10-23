@@ -1,253 +1,476 @@
 (function () {
   "use strict";
 
-  var dockEl = document.getElementById("dock");
+  var COLS = 7;
+  var ROWS = 3;
+  var PAGE_SIZE = COLS * ROWS;
+  var MAX_FAVORITES = 7;
+  var FAVORITES_KEY = "cleanyourtv.favorites.v2";
+  var FIRST_RUN_KEY = "cleanyourtv.favorites.initialized.v2";
+
+  var favoritesEl = document.getElementById("favorites");
   var gridEl = document.getElementById("grid");
   var focusedNameEl = document.getElementById("focusedName");
-  var countEl = document.getElementById("count");
-  var appsSectionEl = document.getElementById("appsSection");
-  var ambientEl = document.getElementById("ambient");
+  var focusedMetaEl = document.getElementById("focusedMeta");
+  var favoriteCountEl = document.getElementById("favoriteCount");
+  var pageInfoEl = document.getElementById("pageInfo");
   var toastEl = document.getElementById("toast");
 
   var allApps = [];
-  var dockApps = [];
-  var gridApps = [];
-  var section = "dock";
-  var index = 0;
-  var columns = 7;
+  var favoriteIds = [];
+  var favoriteApps = [];
+  var pageApps = [];
+  var section = "favorites";
+  var focusIndex = 0;
+  var page = 0;
+  var lastFocusedTile = null;
   var toastTimer = null;
+  var loading = false;
 
-  var preferred = [
-    "youtube", "netflix", "browser", "internet", "fpt",
-    "vieon", "galaxy play", "spotify", "plex", "prime",
-    "apple tv", "jellyfin"
+  var preferredNames = [
+    "youtube", "tizentube", "netflix", "internet", "browser",
+    "fpt play", "vieon", "galaxy play", "spotify", "prime video",
+    "apple tv", "jellyfin", "plex"
   ];
 
   function safeText(v) {
-    return (v == null ? "" : String(v));
+    return v == null ? "" : String(v);
   }
 
-  function initials(name) {
-    var parts = safeText(name).replace(/[^a-zA-Z0-9À-ỹ ]/g, " ").split(/\s+/);
-    var out = "";
-    var i;
-    for (i = 0; i < parts.length && out.length < 3; i++) {
-      if (parts[i]) out += parts[i].charAt(0).toUpperCase();
-    }
-    return out || "APP";
+  function lower(v) {
+    return safeText(v).toLowerCase();
   }
 
-  function colorFor(name) {
-    var h = 0, i;
-    name = safeText(name);
-    for (i = 0; i < name.length; i++) h = ((h << 5) - h) + name.charCodeAt(i);
-    h = Math.abs(h) % 360;
-    return "hsla(" + h + ",70%,55%,.27)";
-  }
-
-  function toast(msg) {
-    toastEl.textContent = msg;
+  function toast(message) {
+    toastEl.textContent = message;
     toastEl.className = "show";
     if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { toastEl.className = ""; }, 2300);
+    toastTimer = setTimeout(function () {
+      toastEl.className = "";
+    }, 2200);
+  }
+
+  function readJson(key, fallback) {
+    try {
+      var raw = localStorage.getItem(key);
+      if (!raw) return fallback;
+      return JSON.parse(raw);
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function writeJson(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   function updateClock() {
     var d = new Date();
     var hh = ("0" + d.getHours()).slice(-2);
     var mm = ("0" + d.getMinutes()).slice(-2);
-    var days = ["Chủ nhật","Thứ hai","Thứ ba","Thứ tư","Thứ năm","Thứ sáu","Thứ bảy"];
-    var months = ["tháng 1","tháng 2","tháng 3","tháng 4","tháng 5","tháng 6",
-                  "tháng 7","tháng 8","tháng 9","tháng 10","tháng 11","tháng 12"];
+    var days = ["Chủ nhật", "Thứ hai", "Thứ ba", "Thứ tư", "Thứ năm", "Thứ sáu", "Thứ bảy"];
+    var months = ["tháng 1", "tháng 2", "tháng 3", "tháng 4", "tháng 5", "tháng 6",
+                  "tháng 7", "tháng 8", "tháng 9", "tháng 10", "tháng 11", "tháng 12"];
     document.getElementById("clock").textContent = hh + ":" + mm;
     document.getElementById("date").textContent =
       days[d.getDay()] + ", " + d.getDate() + " " + months[d.getMonth()];
   }
 
+  function initials(name) {
+    var clean = safeText(name).replace(/[^a-zA-Z0-9À-ỹ ]/g, " ");
+    var parts = clean.split(/\s+/);
+    var result = "";
+    var i;
+    for (i = 0; i < parts.length && result.length < 3; i++) {
+      if (parts[i]) result += parts[i].charAt(0).toUpperCase();
+    }
+    return result || "APP";
+  }
+
+  function hasFavorite(id) {
+    var i;
+    for (i = 0; i < favoriteIds.length; i++) {
+      if (favoriteIds[i] === id) return true;
+    }
+    return false;
+  }
+
+  function appendInitials(parent, name) {
+    var fallback = document.createElement("div");
+    fallback.className = "initials";
+    fallback.textContent = initials(name);
+    parent.appendChild(fallback);
+  }
+
   function makeTile(info) {
     var tile = document.createElement("div");
-    tile.className = "tile";
+    tile.className = "tile" + (hasFavorite(info.id) ? " favoriteMark" : "");
     tile.setAttribute("data-app-id", info.id);
 
-    var wrap = document.createElement("div");
-    wrap.className = "iconWrap";
+    var iconWrap = document.createElement("div");
+    iconWrap.className = "iconWrap";
 
     if (info.iconPath) {
       var img = document.createElement("img");
-      img.src = info.iconPath;
       img.alt = "";
+      img.src = info.iconPath;
       img.onerror = function () {
-        if (img.parentNode) {
-          img.parentNode.removeChild(img);
-          var fallback = document.createElement("div");
-          fallback.className = "initials";
-          fallback.textContent = initials(info.name);
-          wrap.appendChild(fallback);
-        }
+        if (!img.parentNode) return;
+        img.parentNode.removeChild(img);
+        appendInitials(iconWrap, info.name);
       };
-      wrap.appendChild(img);
+      iconWrap.appendChild(img);
     } else {
-      var fallback2 = document.createElement("div");
-      fallback2.className = "initials";
-      fallback2.textContent = initials(info.name);
-      wrap.appendChild(fallback2);
+      appendInitials(iconWrap, info.name);
     }
 
     var label = document.createElement("div");
     label.className = "label";
     label.textContent = info.name;
 
-    tile.appendChild(wrap);
+    tile.appendChild(iconWrap);
     tile.appendChild(label);
     return tile;
   }
 
-  function chooseDock(apps) {
-    var chosen = [];
-    var used = {};
-    var i, j, n;
+  function currentApp() {
+    if (section === "favorites") {
+      return favoriteApps[focusIndex] || null;
+    }
+    return pageApps[focusIndex] || null;
+  }
 
-    for (i = 0; i < preferred.length && chosen.length < 5; i++) {
-      for (j = 0; j < apps.length; j++) {
-        n = safeText(apps[j].name).toLowerCase();
-        if (!used[apps[j].id] && n.indexOf(preferred[i]) !== -1) {
-          chosen.push(apps[j]);
-          used[apps[j].id] = true;
+  function currentTiles() {
+    return section === "favorites" ? favoritesEl.children : gridEl.children;
+  }
+
+  function renderFavorites() {
+    favoritesEl.innerHTML = "";
+    favoriteApps = [];
+
+    var i, j;
+    for (i = 0; i < favoriteIds.length; i++) {
+      for (j = 0; j < allApps.length; j++) {
+        if (allApps[j].id === favoriteIds[i]) {
+          favoriteApps.push(allApps[j]);
           break;
         }
       }
     }
 
-    for (i = 0; i < apps.length && chosen.length < 5; i++) {
-      if (!used[apps[i].id]) {
-        chosen.push(apps[i]);
-        used[apps[i].id] = true;
+    if (favoriteApps.length !== favoriteIds.length) {
+      favoriteIds = [];
+      for (i = 0; i < favoriteApps.length; i++) {
+        favoriteIds.push(favoriteApps[i].id);
+      }
+      writeJson(FAVORITES_KEY, favoriteIds);
+    }
+
+    if (!favoriteApps.length) {
+      var empty = document.createElement("div");
+      empty.className = "emptyFavorites";
+      empty.textContent = "Chọn một ứng dụng bên dưới rồi bấm nút XANH LÁ để ghim";
+      favoritesEl.appendChild(empty);
+    } else {
+      for (i = 0; i < favoriteApps.length; i++) {
+        favoritesEl.appendChild(makeTile(favoriteApps[i]));
+      }
+    }
+
+    favoriteCountEl.textContent = favoriteApps.length + "/" + MAX_FAVORITES;
+  }
+
+  function renderGrid() {
+    gridEl.innerHTML = "";
+
+    var count = Math.max(1, Math.ceil(allApps.length / PAGE_SIZE));
+    if (page >= count) page = count - 1;
+    if (page < 0) page = 0;
+
+    var start = page * PAGE_SIZE;
+    var end = Math.min(start + PAGE_SIZE, allApps.length);
+    pageApps = allApps.slice(start, end);
+
+    var i;
+    for (i = 0; i < pageApps.length; i++) {
+      gridEl.appendChild(makeTile(pageApps[i]));
+    }
+
+    pageInfoEl.textContent =
+      allApps.length + " app • Trang " + (page + 1) + "/" + count;
+  }
+
+  function normalizeFocus() {
+    var list = section === "favorites" ? favoriteApps : pageApps;
+
+    if (section === "favorites" && !favoriteApps.length) {
+      section = "grid";
+      focusIndex = 0;
+      list = pageApps;
+    }
+
+    if (!list.length) {
+      focusIndex = 0;
+      return;
+    }
+
+    if (focusIndex < 0) focusIndex = 0;
+    if (focusIndex >= list.length) focusIndex = list.length - 1;
+  }
+
+  function applyFocus() {
+    if (lastFocusedTile) {
+      lastFocusedTile.classList.remove("focused");
+      lastFocusedTile = null;
+    }
+
+    normalizeFocus();
+
+    var app = currentApp();
+    var tiles = currentTiles();
+
+    if (!app) {
+      focusedNameEl.textContent =
+        allApps.length ? "Chọn ứng dụng" : "Không có ứng dụng";
+      focusedMetaEl.textContent = "";
+      return;
+    }
+
+    if (tiles[focusIndex] &&
+        tiles[focusIndex].classList &&
+        tiles[focusIndex].classList.contains("tile")) {
+      lastFocusedTile = tiles[focusIndex];
+      lastFocusedTile.classList.add("focused");
+    }
+
+    focusedNameEl.textContent = app.name;
+    focusedMetaEl.textContent =
+      (section === "favorites" ? "Yêu thích" : "Tất cả ứng dụng") +
+      " • " + (hasFavorite(app.id) ? "Đã ghim" : "Chưa ghim");
+  }
+
+  function renderAll(keepFocus) {
+    var previousId = keepFocus && currentApp() ? currentApp().id : "";
+
+    renderFavorites();
+    renderGrid();
+
+    if (previousId) {
+      var list = section === "favorites" ? favoriteApps : pageApps;
+      var i;
+      for (i = 0; i < list.length; i++) {
+        if (list[i].id === previousId) {
+          focusIndex = i;
+          break;
+        }
+      }
+    }
+
+    normalizeFocus();
+    applyFocus();
+  }
+
+  function defaultFavorites() {
+    var chosen = [];
+    var used = {};
+    var i, j, name;
+
+    for (i = 0;
+         i < preferredNames.length && chosen.length < 5;
+         i++) {
+      for (j = 0; j < allApps.length; j++) {
+        name = lower(allApps[j].name);
+        if (!used[allApps[j].id] &&
+            name.indexOf(preferredNames[i]) !== -1) {
+          chosen.push(allApps[j].id);
+          used[allApps[j].id] = true;
+          break;
+        }
+      }
+    }
+
+    for (i = 0; i < allApps.length && chosen.length < 5; i++) {
+      if (!used[allApps[i].id]) {
+        chosen.push(allApps[i].id);
+        used[allApps[i].id] = true;
       }
     }
 
     return chosen;
   }
 
-  function render() {
-    dockEl.innerHTML = "";
-    gridEl.innerHTML = "";
+  function ensureFavorites() {
+    var initialized = false;
 
-    dockApps = chooseDock(allApps);
-    var dockIds = {};
+    try {
+      initialized = localStorage.getItem(FIRST_RUN_KEY) === "1";
+    } catch (e) {}
+
+    if (!initialized) {
+      favoriteIds = defaultFavorites();
+      writeJson(FAVORITES_KEY, favoriteIds);
+      try {
+        localStorage.setItem(FIRST_RUN_KEY, "1");
+      } catch (e2) {}
+    } else {
+      favoriteIds = readJson(FAVORITES_KEY, []);
+      if (!favoriteIds || typeof favoriteIds.length !== "number") {
+        favoriteIds = [];
+      }
+      if (favoriteIds.length > MAX_FAVORITES) {
+        favoriteIds = favoriteIds.slice(0, MAX_FAVORITES);
+      }
+    }
+  }
+
+  function toggleFavorite() {
+    var app = currentApp();
+    if (!app) return;
+
     var i;
+    var next = [];
 
-    for (i = 0; i < dockApps.length; i++) {
-      dockIds[dockApps[i].id] = true;
-      dockEl.appendChild(makeTile(dockApps[i]));
-    }
+    if (hasFavorite(app.id)) {
+      for (i = 0; i < favoriteIds.length; i++) {
+        if (favoriteIds[i] !== app.id) next.push(favoriteIds[i]);
+      }
 
-    gridApps = [];
-    for (i = 0; i < allApps.length; i++) {
-      if (!dockIds[allApps[i].id]) gridApps.push(allApps[i]);
-    }
+      favoriteIds = next;
+      writeJson(FAVORITES_KEY, favoriteIds);
+      toast("Đã bỏ ghim " + app.name);
 
-    for (i = 0; i < gridApps.length; i++) {
-      gridEl.appendChild(makeTile(gridApps[i]));
-    }
+      if (section === "favorites") {
+        renderFavorites();
+        if (!favoriteApps.length) {
+          section = "grid";
+          focusIndex = 0;
+        } else if (focusIndex >= favoriteApps.length) {
+          focusIndex = favoriteApps.length - 1;
+        }
+        renderGrid();
+        applyFocus();
+      } else {
+        renderAll(true);
+      }
 
-    countEl.textContent = allApps.length + " app";
-    section = dockApps.length ? "dock" : "grid";
-    index = 0;
-    applyFocus();
-  }
-
-  function currentList() {
-    return section === "dock" ? dockApps : gridApps;
-  }
-
-  function currentTiles() {
-    return section === "dock" ? dockEl.children : gridEl.children;
-  }
-
-  function applyFocus() {
-    var i;
-    var allTiles = document.querySelectorAll(".tile");
-
-    for (i = 0; i < allTiles.length; i++) {
-      allTiles[i].classList.remove("focused");
-    }
-
-    var list = currentList();
-    var tiles = currentTiles();
-
-    if (!list.length) {
-      focusedNameEl.textContent = "Không có ứng dụng";
       return;
     }
 
-    if (index < 0) index = 0;
-    if (index >= list.length) index = list.length - 1;
-
-    if (tiles[index]) tiles[index].classList.add("focused");
-
-    focusedNameEl.textContent = list[index].name || "Ứng dụng";
-    ambientEl.style.background = colorFor(list[index].name);
-    appsSectionEl.className = section === "grid" ? "active" : "";
-
-    if (section === "grid" && tiles[index] && tiles[index].scrollIntoView) {
-      try { tiles[index].scrollIntoView(false); } catch (e) {}
+    if (favoriteIds.length >= MAX_FAVORITES) {
+      toast("Favorites đã đủ " + MAX_FAVORITES + " ứng dụng");
+      return;
     }
+
+    favoriteIds.push(app.id);
+    writeJson(FAVORITES_KEY, favoriteIds);
+    toast("Đã ghim " + app.name);
+    renderAll(true);
   }
 
   function launchCurrent() {
-    var list = currentList();
-    if (!list.length || !list[index]) return;
+    var app = currentApp();
+    if (!app) return;
 
-    var info = list[index];
-
-    if (window.tizen && tizen.application && tizen.application.launch) {
-      try {
-        tizen.application.launch(
-          info.id,
-          function () {},
-          function (e) {
-            toast("Không mở được " + info.name + ": " +
-              (e && e.message ? e.message : "lỗi"));
-          }
-        );
-      } catch (e2) {
-        toast("Không mở được " + info.name);
-      }
-    } else {
+    if (!(window.tizen &&
+          tizen.application &&
+          tizen.application.launch)) {
       toast("Tizen Application API không khả dụng");
+      return;
+    }
+
+    try {
+      tizen.application.launch(
+        app.id,
+        function () {},
+        function (err) {
+          toast(
+            "Không mở được " + app.name +
+            (err && err.message ? ": " + err.message : "")
+          );
+        }
+      );
+    } catch (e) {
+      toast("Không mở được " + app.name);
     }
   }
 
+  function pageCount() {
+    return Math.max(1, Math.ceil(allApps.length / PAGE_SIZE));
+  }
+
+  function changePage(delta) {
+    var next = page + delta;
+    var count = pageCount();
+
+    if (next < 0 || next >= count) return;
+
+    page = next;
+    section = "grid";
+    focusIndex = 0;
+    renderGrid();
+    applyFocus();
+  }
+
   function moveLeft() {
-    if (index > 0) index--;
+    if (section === "favorites") {
+      if (focusIndex > 0) focusIndex--;
+    } else {
+      var col = focusIndex % COLS;
+      if (col > 0) focusIndex--;
+    }
     applyFocus();
   }
 
   function moveRight() {
-    if (index + 1 < currentList().length) index++;
+    var list = section === "favorites" ? favoriteApps : pageApps;
+
+    if (section === "favorites") {
+      if (focusIndex + 1 < list.length) focusIndex++;
+    } else {
+      var col = focusIndex % COLS;
+      if (col < COLS - 1 && focusIndex + 1 < list.length) {
+        focusIndex++;
+      }
+    }
+
     applyFocus();
   }
 
   function moveDown() {
-    if (section === "dock" && gridApps.length) {
+    if (section === "favorites") {
       section = "grid";
-      index = Math.min(index, gridApps.length - 1);
-    } else if (section === "grid") {
-      var n = index + columns;
-      if (n < gridApps.length) index = n;
+      focusIndex = Math.min(
+        focusIndex,
+        Math.max(0, pageApps.length - 1)
+      );
+    } else {
+      var target = focusIndex + COLS;
+      if (target < pageApps.length) focusIndex = target;
     }
+
     applyFocus();
   }
 
   function moveUp() {
     if (section === "grid") {
-      if (index - columns >= 0) {
-        index -= columns;
-      } else if (dockApps.length) {
-        section = "dock";
-        index = Math.min(index, dockApps.length - 1);
+      var target = focusIndex - COLS;
+
+      if (target >= 0) {
+        focusIndex = target;
+      } else if (favoriteApps.length) {
+        section = "favorites";
+        focusIndex = Math.min(
+          focusIndex % COLS,
+          favoriteApps.length - 1
+        );
       }
     }
+
     applyFocus();
   }
 
@@ -266,79 +489,88 @@
     } catch (e2) {}
   }
 
-  function onKey(e) {
-    var code = e.keyCode || e.which;
+  function isLikelyHiddenSystemApp(app) {
+    var name = lower(app.name);
+    var id = lower(app.id);
 
-    if (code === 37) {
-      moveLeft();
-      e.preventDefault();
-    } else if (code === 39) {
-      moveRight();
-      e.preventDefault();
-    } else if (code === 38) {
-      moveUp();
-      e.preventDefault();
-    } else if (code === 40) {
-      moveDown();
-      e.preventDefault();
-    } else if (code === 13) {
-      launchCurrent();
-      e.preventDefault();
-    } else if (code === 10009 || code === 27) {
-      goBack();
-      e.preventDefault();
-    } else if (code === 405) {
-      loadApps();
-      e.preventDefault();
+    if (!name) return true;
+    if (name.indexOf("com.") === 0) return true;
+
+    if ((name.indexOf("service") !== -1 ||
+         name.indexOf("daemon") !== -1) &&
+        (id.indexOf("service") !== -1 ||
+         id.indexOf("daemon") !== -1)) {
+      return true;
     }
+
+    return false;
   }
 
   function normalizeApps(apps) {
     var currentId = "";
-
     try {
-      currentId = tizen.application.getCurrentApplication().appInfo.id;
+      currentId =
+        tizen.application.getCurrentApplication().appInfo.id;
     } catch (e) {}
 
+    var seen = {};
     var out = [];
-    var i, a;
+    var i, app, info;
 
     for (i = 0; i < apps.length; i++) {
-      a = apps[i];
+      app = apps[i];
 
-      if (!a || !a.id || a.id === currentId) continue;
-      if (a.show === false) continue;
+      if (!app || !app.id || app.id === currentId) continue;
+      if (app.show === false) continue;
+      if (seen[app.id]) continue;
 
-      out.push({
-        id: a.id,
-        name: a.name || a.id,
-        iconPath: a.iconPath || "",
-        packageId: a.packageId || ""
-      });
+      info = {
+        id: app.id,
+        name: app.name || app.id,
+        iconPath: app.iconPath || "",
+        packageId: app.packageId || ""
+      };
+
+      if (isLikelyHiddenSystemApp(info)) continue;
+
+      seen[app.id] = true;
+      out.push(info);
     }
 
-    out.sort(function (x, y) {
-      return safeText(x.name).toLowerCase()
-        .localeCompare(safeText(y.name).toLowerCase());
+    out.sort(function (a, b) {
+      var aa = lower(a.name);
+      var bb = lower(b.name);
+      if (aa < bb) return -1;
+      if (aa > bb) return 1;
+      return 0;
     });
 
     return out;
   }
 
-  function loadApps() {
+  function loadApps(showMessage) {
+    if (loading) return;
+
+    loading = true;
     focusedNameEl.textContent = "Đang đọc ứng dụng…";
+    focusedMetaEl.textContent = "";
 
     if (!(window.tizen &&
           tizen.application &&
           tizen.application.getAppsInfo)) {
+      loading = false;
+
       allApps = [
         { id: "demo.youtube", name: "YouTube", iconPath: "" },
         { id: "demo.netflix", name: "Netflix", iconPath: "" },
-        { id: "demo.browser", name: "Internet", iconPath: "" },
-        { id: "demo.apps", name: "Apps", iconPath: "" }
+        { id: "demo.internet", name: "Internet", iconPath: "" },
+        { id: "demo.spotify", name: "Spotify", iconPath: "" },
+        { id: "demo.apple", name: "Apple TV", iconPath: "" }
       ];
 
-      render();
+      ensureFavorites();
+      page = 0;
+      renderAll(false);
       toast("Đang ở chế độ demo: không thấy Tizen API");
       return;
     }
@@ -346,30 +578,73 @@
     try {
       tizen.application.getAppsInfo(
         function (apps) {
+          loading = false;
           allApps = normalizeApps(apps || []);
-          render();
+          ensureFavorites();
+
+          if (page >= pageCount()) {
+            page = pageCount() - 1;
+          }
+
+          renderAll(false);
+
+          if (showMessage) {
+            toast("Đã làm mới " + allApps.length + " ứng dụng");
+          }
 
           if (!allApps.length) {
-            toast("Không tìm thấy app hiển thị được");
+            toast("Không tìm thấy ứng dụng hiển thị được");
           }
         },
         function (err) {
-          allApps = [];
-          render();
-          toast("Không đọc được danh sách app: " +
-            (err && err.message ? err.message : "lỗi"));
+          loading = false;
+          toast(
+            "Không đọc được danh sách app" +
+            (err && err.message ? ": " + err.message : "")
+          );
+          renderAll(false);
         }
       );
     } catch (e) {
-      allApps = [];
-      render();
+      loading = false;
       toast("Lỗi Tizen API: " + e.message);
+      renderAll(false);
     }
+  }
+
+  function onKey(e) {
+    var code = e.keyCode || e.which;
+
+    if (code === 37) {
+      moveLeft();
+    } else if (code === 39) {
+      moveRight();
+    } else if (code === 38) {
+      moveUp();
+    } else if (code === 40) {
+      moveDown();
+    } else if (code === 13) {
+      launchCurrent();
+    } else if (code === 10009 || code === 27) {
+      goBack();
+    } else if (code === 403) {
+      changePage(-1);
+    } else if (code === 404) {
+      toggleFavorite();
+    } else if (code === 405) {
+      loadApps(true);
+    } else if (code === 406) {
+      changePage(1);
+    } else {
+      return;
+    }
+
+    if (e.preventDefault) e.preventDefault();
   }
 
   window.addEventListener("keydown", onKey, false);
 
   updateClock();
-  setInterval(updateClock, 15000);
-  loadApps();
+  setInterval(updateClock, 30000);
+  loadApps(false);
 })();
